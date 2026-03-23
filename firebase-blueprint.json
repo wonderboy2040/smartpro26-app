@@ -1,0 +1,73 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Stores user settings and risk profile.",
+      "type": "object",
+      "properties": {
+        "displayName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "riskLevel": { "type": "string", "enum": ["low", "medium", "high"] },
+        "sipAmount": { "type": "number" },
+        "years": { "type": "number" },
+        "expectedReturn": { "type": "number" },
+        "lastSync": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email"]
+    },
+    "Asset": {
+      "title": "Portfolio Asset",
+      "description": "Represents an individual asset in the user's portfolio.",
+      "type": "object",
+      "properties": {
+        "symbol": { "type": "string" },
+        "market": { "type": "string", "enum": ["IN", "US"] },
+        "qty": { "type": "number" },
+        "avgPrice": { "type": "number" },
+        "leverage": { "type": "number" },
+        "dateAdded": { "type": "string", "format": "date" }
+      },
+      "required": ["symbol", "market", "qty", "avgPrice"]
+    },
+    "Log": {
+      "title": "Activity Log",
+      "description": "Stores system activity logs for the terminal.",
+      "type": "object",
+      "properties": {
+        "msg": { "type": "string" },
+        "type": { "type": "string", "enum": ["info", "warn", "success", "error"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["msg", "type", "timestamp"]
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "Represents a single message in a chat conversation.",
+      "type": "object",
+      "properties": {
+        "role": { "type": "string", "enum": ["user", "model"] },
+        "text": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["role", "text", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile document."
+    },
+    "/users/{userId}/portfolio/{assetId}": {
+      "schema": "Asset",
+      "description": "Collection of assets in the user's portfolio."
+    },
+    "/users/{userId}/logs/{logId}": {
+      "schema": "Log",
+      "description": "Collection of activity logs for the user."
+    },
+    "/users/{userId}/chat_history/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Collection of chat messages for the user."
+    }
+  }
+}
