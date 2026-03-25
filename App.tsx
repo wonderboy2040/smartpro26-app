@@ -198,6 +198,43 @@ const guessMarket = (sym: string): 'IN' | 'US' => {
   return 'US';
 };
 
+const calculateRSI = (data: {time: number, price: number}[], period: number = 14) => {
+  if (data.length < period + 1) return 50;
+  
+  let gains = 0;
+  let losses = 0;
+  
+  for (let i = 1; i <= period; i++) {
+    const change = data[i].price - data[i - 1].price;
+    if (change >= 0) {
+      gains += change;
+    } else {
+      losses -= change;
+    }
+  }
+  
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+  
+  for (let i = period + 1; i < data.length; i++) {
+    const change = data[i].price - data[i - 1].price;
+    let gain = 0;
+    let loss = 0;
+    if (change >= 0) {
+      gain = change;
+    } else {
+      loss = -change;
+    }
+    
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+  }
+  
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+};
+
 const getFinancialNews: FunctionDeclaration = {
   name: "getFinancialNews",
   description: "Fetch the latest financial news articles and headlines for a specific asset, stock, crypto, or general market trend. Use this to analyze sentiment and provide informed responses.",
@@ -606,7 +643,7 @@ export default function App() {
 
       const fetchedPrices: Record<string, PriceData> = {};
       
-      for (const sym of symbols) {
+      await Promise.allSettled(symbols.map(async (sym) => {
         try {
           const mkt = guessMarket(sym);
           const cleanSym = sym.replace('.NS', '').replace('.BO', '');
@@ -658,7 +695,7 @@ export default function App() {
         } catch (err) {
           console.error(`Error fetching ${sym}`, err);
         }
-      }
+      }));
       
       setLivePrices(prev => {
         const newPrices = { ...prev };
@@ -710,8 +747,8 @@ export default function App() {
 
   useEffect(() => {
     fetchPrices();
-    const timer = setInterval(() => fetchPrices(false), 60000);
-    const etfTimer = setInterval(() => fetchPrices(true), 5000);
+    const timer = setInterval(() => fetchPrices(false), 10000);
+    const etfTimer = setInterval(() => fetchPrices(true), 3000);
     return () => {
       clearInterval(timer);
       clearInterval(etfTimer);
@@ -975,7 +1012,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-10">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 mb-10">
                         <div className="bg-slate-950/50 border border-slate-800 p-6 rounded-3xl shadow-inner">
                           <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Pre-Market / Open</div>
                           <div className="text-xl font-black text-cyan-400 uppercase tracking-tight">
@@ -1000,6 +1037,12 @@ export default function App() {
                             {livePrices[`${guessMarket(currentSymbol)}_${currentSymbol}`]?.fundamentals?.volume 
                               ? livePrices[`${guessMarket(currentSymbol)}_${currentSymbol}`].fundamentals!.volume!.toLocaleString()
                               : 'N/A'}
+                          </div>
+                        </div>
+                        <div className="bg-slate-950/50 border border-slate-800 p-6 rounded-3xl shadow-inner">
+                          <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">RSI (14)</div>
+                          <div className={`text-xl font-black uppercase tracking-tight ${calculateRSI(chartData) > 70 ? 'text-red-400' : calculateRSI(chartData) < 30 ? 'text-emerald-400' : 'text-cyan-400'}`}>
+                            {calculateRSI(chartData).toFixed(2)}
                           </div>
                         </div>
                       </div>
