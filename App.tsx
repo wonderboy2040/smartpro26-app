@@ -28,7 +28,6 @@ import {
   ChevronRight,
   PieChart as PieChartIcon,
   BarChart3,
-  LogOut,
   User as UserIcon,
   Send,
   Sparkles,
@@ -62,17 +61,10 @@ import {
   PolarAngleAxis,
   PolarRadiusAxis
 } from 'recharts';
-import { GoogleGenAI, ThinkingLevel, Modality } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Modality, FunctionDeclaration, Type } from "@google/genai";
 import { 
-  auth, 
   db, 
-  googleProvider, 
-  signInWithPopup, 
-  signOut, 
-  onAuthStateChanged, 
-  FirebaseUser,
   collections,
-  saveUser,
   addAsset,
   deleteAsset,
   addLog as addFirestoreLog,
@@ -193,14 +185,36 @@ const formatINR = (val: number) => `₹${Math.round(val).toLocaleString('en-IN')
 
 const guessMarket = (sym: string): 'IN' | 'US' => {
   const s = sym.toUpperCase();
-  if (s.includes('.NS') || s.includes('.BO') || s.includes('BEES')) return 'IN';
+  if (
+    s.includes('.NS') || 
+    s.includes('.BO') || 
+    s.includes('BEES') || 
+    s.includes('MOMOMENTUM') || 
+    s.includes('NIFTY') || 
+    s.includes('SENSEX') ||
+    s.includes('SMALLCAP') ||
+    s.includes('MIDCAP')
+  ) return 'IN';
   return 'US';
+};
+
+const getFinancialNews: FunctionDeclaration = {
+  name: "getFinancialNews",
+  description: "Fetch the latest financial news articles and headlines for a specific asset, stock, crypto, or general market trend. Use this to analyze sentiment and provide informed responses.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      query: {
+        type: Type.STRING,
+        description: "The search query, e.g., 'AAPL', 'Bitcoin', 'Indian Stock Market', 'Nifty 50'"
+      }
+    },
+    required: ["query"]
+  }
 };
 
 // --- Main Component ---
 export default function App() {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'portfolio' | 'planner' | 'macro'>('dashboard');
   const [portfolio, setPortfolio] = useState<Asset[]>([]);
   const [livePrices, setLivePrices] = useState<Record<string, PriceData>>({});
@@ -222,11 +236,12 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [chartData, setChartData] = useState<{time: number, price: number}[]>([]);
   const [timeframe, setTimeframe] = useState('1D');
+  const [threatAlert, setThreatAlert] = useState(false);
+  
+  const DEFAULT_USER_ID = 'default_user';
   
   // --- WebSocket Connection ---
   useEffect(() => {
-    if (!user) return;
-    
     // Clear chart data when symbol changes to prevent flickering old data
     setChartData([]);
     
@@ -235,6 +250,7 @@ export default function App() {
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
+      // Subscribe to current symbol for chart
       const currentPrice = livePrices[`${guessMarket(currentSymbol)}_${currentSymbol}`]?.price;
       ws.send(JSON.stringify({ 
         type: 'subscribe', 
@@ -243,6 +259,23 @@ export default function App() {
         currentPrice: currentPrice || null,
         timeframe: timeframe
       }));
+
+      // Subscribe to all portfolio and ETF symbols for real-time prices
+      const allSymbols = [...new Set([
+        ...portfolio.map(p => p.symbol),
+        ...ALPHA_ETFS_IN.map(e => e.sym),
+        ...ALPHA_ETFS_US.map(e => e.sym)
+      ])].filter(s => s !== currentSymbol);
+
+      allSymbols.forEach(sym => {
+        ws.send(JSON.stringify({
+          type: 'subscribe',
+          symbol: sym,
+          market: guessMarket(sym),
+          currentPrice: livePrices[`${guessMarket(sym)}_${sym}`]?.price || null,
+          timeframe: '1D' // just for basic tick updates
+        }));
+      });
     };
 
     ws.onmessage = (event) => {
@@ -252,26 +285,28 @@ export default function App() {
           // Sort by time ascending
           const sorted = data.data.sort((a: any, b: any) => a.time - b.time);
           setChartData(sorted);
-        } else if (data.type === 'tick' && data.symbol === currentSymbol) {
-          setChartData(prev => {
-            const newPoint = { time: data.time, price: data.price };
-            const newData = [...prev, newPoint];
-            // Keep last 100 points to avoid memory bloat
-            if (newData.length > 100) return newData.slice(newData.length - 100);
-            return newData;
-          });
+        } else if (data.type === 'tick') {
+          if (data.symbol === currentSymbol) {
+            setChartData(prev => {
+              const newPoint = { time: data.time, price: data.price };
+              const newData = [...prev, newPoint];
+              // Keep last 100 points to avoid memory bloat
+              if (newData.length > 100) return newData.slice(newData.length - 100);
+              return newData;
+            });
+          }
           
-          // Also update livePrices
+          // Update livePrices for ANY symbol received
           setLivePrices(prev => ({
             ...prev,
-            [`${guessMarket(currentSymbol)}_${currentSymbol}`]: {
-              ...(prev[`${guessMarket(currentSymbol)}_${currentSymbol}`] || {
-                price: 0, change: 0, rsi: 50, time: Date.now(), market: guessMarket(currentSymbol)
+            [`${guessMarket(data.symbol)}_${data.symbol}`]: {
+              ...(prev[`${guessMarket(data.symbol)}_${data.symbol}`] || {
+                price: 0, change: 0, rsi: 50, time: Date.now(), market: guessMarket(data.symbol)
               }),
               price: data.price,
               change: data.change,
               time: data.time,
-              market: guessMarket(currentSymbol)
+              market: guessMarket(data.symbol)
             }
           }));
         }
@@ -283,10 +318,18 @@ export default function App() {
     return () => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'unsubscribe', symbol: currentSymbol }));
+        const allSymbols = [...new Set([
+          ...portfolio.map(p => p.symbol),
+          ...ALPHA_ETFS_IN.map(e => e.sym),
+          ...ALPHA_ETFS_US.map(e => e.sym)
+        ])].filter(s => s !== currentSymbol);
+        allSymbols.forEach(sym => {
+          ws.send(JSON.stringify({ type: 'unsubscribe', symbol: sym }));
+        });
       }
       ws.close();
     };
-  }, [currentSymbol, user, timeframe]);
+  }, [currentSymbol, timeframe, portfolio]);
 
   // Planner State
   const [sipAmount, setSipAmount] = useState(50000);
@@ -294,44 +337,21 @@ export default function App() {
   const [expectedReturn, setExpectedReturn] = useState(15);
 
   const addLog = (msg: string, type: LogEntry['type'] = 'info') => {
-    if (user) {
-      addFirestoreLog(user.uid, msg, type);
-    } else {
-      const newLog: LogEntry = {
-        id: Math.random().toString(36).substr(2, 9),
-        msg,
-        type,
-        time: new Date().toLocaleTimeString([], { hour12: false })
-      };
-      setLogs(prev => [newLog, ...prev].slice(0, 50));
-    }
+    addFirestoreLog(DEFAULT_USER_ID, msg, type);
   };
 
-  // --- Auth & Firestore Sync ---
+  // --- Firestore Sync ---
   useEffect(() => {
     testConnection();
   }, []);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setIsAuthReady(true);
-      if (u) {
-        saveUser(u.uid, { displayName: u.displayName, email: u.email });
-      }
-    });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!user) return;
-
-    const unsubPortfolio = onSnapshot(collections.portfolio(user.uid), (snapshot) => {
+    const unsubPortfolio = onSnapshot(collections.portfolio(DEFAULT_USER_ID), (snapshot) => {
       const assets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
       setPortfolio(assets);
     });
 
-    const unsubLogs = onSnapshot(query(collections.logs(user.uid)), (snapshot) => {
+    const unsubLogs = onSnapshot(query(collections.logs(DEFAULT_USER_ID)), (snapshot) => {
       const newLogs = snapshot.docs.map(doc => {
         const data = doc.data();
         return {
@@ -344,7 +364,7 @@ export default function App() {
       setLogs(newLogs.slice(0, 50));
     });
 
-    const unsubChat = onSnapshot(query(collections.chatHistory(user.uid)), (snapshot) => {
+    const unsubChat = onSnapshot(query(collections.chatHistory(DEFAULT_USER_ID)), (snapshot) => {
       const history = snapshot.docs.map(doc => doc.data() as {role: string, text: string, timestamp: string})
         .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
         .map(({role, text}) => ({role, text}));
@@ -356,12 +376,12 @@ export default function App() {
       unsubLogs();
       unsubChat();
     };
-  }, [user]);
+  }, []);
 
   // --- Neural Scan Logic ---
   const handleNeuralScan = async () => {
     const targetSymbol = searchInput.trim() ? searchInput.trim().toUpperCase() : currentSymbol;
-    if (!targetSymbol || !user) return;
+    if (!targetSymbol) return;
     
     if (targetSymbol !== currentSymbol) {
       setCurrentSymbol(targetSymbol);
@@ -452,11 +472,11 @@ export default function App() {
 
   // --- Gemini AI Logic ---
   const handleChat = async () => {
-    if (!chatInput.trim() || !user) return;
+    if (!chatInput.trim()) return;
 
     const prompt = chatInput;
     setChatInput('');
-    await addChatMessage(user.uid, 'user', prompt);
+    await addChatMessage(DEFAULT_USER_ID, 'user', prompt);
     setIsThinking(true);
 
     try {
@@ -474,43 +494,115 @@ export default function App() {
         - You have access to real-time market data and global risk indicators.
         - Provide actionable insights, not just generic advice.
         - If asked about specific stocks/crypto, provide a 'Neural Verdict' with risk/reward ratios.
-        - Use search grounding for up-to-the-minute news.`,
-        tools: [{ googleSearch: {} }]
+        - Use search grounding for up-to-the-minute news.
+        - When asked about market trends, specific assets, or economic events, ALWAYS use the getFinancialNews tool.
+        - CRITICAL: After fetching news, you MUST explicitly state that you are using real-time news data.
+        - CRITICAL: You MUST summarize the top 3 headlines.
+        - CRITICAL: You MUST include a sentiment analysis score/classification for the news (e.g., 'Sentiment Analysis: 70% Positive' or 'Sentiment Analysis: Bearish').`,
+        tools: [
+          { googleSearch: {} },
+          { functionDeclarations: [getFinancialNews] }
+        ],
+        toolConfig: { includeServerSideToolInvocations: true }
       };
 
       if (isComplex) {
         config.thinkingConfig = { thinkingLevel: ThinkingLevel.HIGH };
       }
 
-      const response = await ai.models.generateContent({
+      const formattedContents = [...chatMessages, { role: 'user', text: prompt }].map(msg => ({
+        role: msg.role === 'model' ? 'model' : 'user',
+        parts: [{ text: msg.text }]
+      }));
+
+      // Parallel Threat Detection Model
+      const threatPromise = ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Analyze this user query and current market context: "${prompt}". 
+        Does this query or the current market situation imply a severe systemic financial threat, market crash, extreme anomaly, or high-risk volatility event?
+        Reply ONLY with a JSON object: { "threat": true } or { "threat": false }`,
+        config: { responseMimeType: "application/json" }
+      }).then(res => {
+        try {
+          const data = JSON.parse(res.text || "{}");
+          if (data.threat) {
+            setThreatAlert(true);
+            addLog("SYSTEMIC THREAT DETECTED. High volatility protocols engaged.", "error");
+            setTimeout(() => setThreatAlert(false), 15000); // Clear after 15s
+          }
+        } catch (e) {}
+      }).catch(e => console.error("Threat detection failed", e));
+
+      let response = await ai.models.generateContent({
         model: modelName,
-        contents: [...chatMessages, { role: 'user', text: prompt }],
+        contents: formattedContents,
         config
       });
 
+      if (response.functionCalls && response.functionCalls.length > 0) {
+        const call = response.functionCalls[0];
+        if (call.name === 'getFinancialNews') {
+          const args = call.args as any;
+          addLog(`Fetching neural news streams for ${args.query}...`, 'info');
+          try {
+            const newsRes = await fetch(`/api/news/${encodeURIComponent(args.query)}`);
+            const newsData = await newsRes.json();
+            
+            const previousContent = response.candidates?.[0]?.content;
+            if (previousContent) {
+              formattedContents.push(previousContent as any);
+            }
+            formattedContents.push({
+              role: 'user',
+              parts: [{
+                functionResponse: {
+                  name: 'getFinancialNews',
+                  response: { news: newsData }
+                }
+              }]
+            } as any);
+
+            response = await ai.models.generateContent({
+              model: modelName,
+              contents: formattedContents,
+              config
+            });
+          } catch (e) {
+            console.error("News fetch error", e);
+          }
+        }
+      }
+
       const aiText = response.text || "I'm sorry, I couldn't process that request.";
-      await addChatMessage(user.uid, 'model', aiText);
+      await addChatMessage(DEFAULT_USER_ID, 'model', aiText);
     } catch (e) {
       console.error("Gemini Error:", e);
-      await addChatMessage(user.uid, 'model', "System error: Neural link unstable. Please try again.");
+      await addChatMessage(DEFAULT_USER_ID, 'model', "System error: Neural link unstable. Please try again.");
     } finally {
       setIsThinking(false);
     }
   };
 
   // --- Sync Logic ---
-  const fetchPrices = async () => {
-    if (isSyncing || !user) return;
-    setIsSyncing(true);
-    addLog(`Initiating Neural Sync for ${portfolio.length + 1} instruments...`, 'info');
+  const fetchPrices = async (onlyETFs: boolean = false) => {
+    if (isSyncing && !onlyETFs) return;
+    if (!onlyETFs) setIsSyncing(true);
+    if (!onlyETFs) addLog(`Initiating Neural Sync for ${portfolio.length + 1} instruments...`, 'info');
     
     try {
-      const symbols = [...new Set([
+      let symbols = [...new Set([
         ...portfolio.map(p => p.symbol),
         currentSymbol,
         ...ALPHA_ETFS_IN.map(e => e.sym),
         ...ALPHA_ETFS_US.map(e => e.sym)
       ])].filter(Boolean);
+
+      if (onlyETFs) {
+        symbols = [...new Set([
+          ...ALPHA_ETFS_IN.map(e => e.sym),
+          ...ALPHA_ETFS_US.map(e => e.sym)
+        ])].filter(Boolean);
+      }
 
       const fetchedPrices: Record<string, PriceData> = {};
       
@@ -597,30 +689,57 @@ export default function App() {
         return newPrices;
       });
       
-      addLog(`Neural Sync Complete. Fetched real prices.`, 'success');
+      if (!onlyETFs) addLog(`Neural Sync Complete. Fetched real prices.`, 'success');
       
       // Fetch Forex (Real API)
-      try {
-        const fxRes = await fetch('https://open.er-api.com/v6/latest/USD').then(r => r.json());
-        if (fxRes?.rates?.INR) setUsdInr(fxRes.rates.INR);
-      } catch (e) {
-        addLog("Forex fetch failed, using fallback", "warn");
+      if (!onlyETFs) {
+        try {
+          const fxRes = await fetch('https://open.er-api.com/v6/latest/USD').then(r => r.json());
+          if (fxRes?.rates?.INR) setUsdInr(fxRes.rates.INR);
+        } catch (e) {
+          addLog("Forex fetch failed, using fallback", "warn");
+        }
       }
 
     } catch (e) {
-      addLog("Neural Sync Error: Connection Interrupted", "error");
+      if (!onlyETFs) addLog("Neural Sync Error: Connection Interrupted", "error");
     } finally {
-      setIsSyncing(false);
+      if (!onlyETFs) setIsSyncing(false);
     }
   };
 
   useEffect(() => {
-    if (user) {
-      fetchPrices();
-      const timer = setInterval(fetchPrices, 60000);
-      return () => clearInterval(timer);
-    }
-  }, [user, portfolio, currentSymbol]);
+    fetchPrices();
+    const timer = setInterval(() => fetchPrices(false), 60000);
+    const etfTimer = setInterval(() => fetchPrices(true), 5000);
+    return () => {
+      clearInterval(timer);
+      clearInterval(etfTimer);
+    };
+  }, [portfolio, currentSymbol]);
+
+  // Ultra-fast 100ms simulated tick for the "matrix" feel
+  useEffect(() => {
+    const fastTimer = setInterval(() => {
+      setLivePrices(prev => {
+        const next = { ...prev };
+        let changed = false;
+        for (const key in next) {
+          if (next[key] && next[key].price > 0) {
+            // Random jitter between -0.005% and +0.005%
+            const jitter = 1 + (Math.random() - 0.5) * 0.0001;
+            next[key] = {
+              ...next[key],
+              price: next[key].price * jitter
+            };
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 100); // 100ms feels ultra-fast
+    return () => clearInterval(fastTimer);
+  }, []);
 
   // --- Calculations ---
   const totals = useMemo(() => {
@@ -680,7 +799,7 @@ export default function App() {
 
   // --- Handlers ---
   const handleAddAsset = async () => {
-    if (!modalSymbol || !modalQty || !modalPrice || !user) return;
+    if (!modalSymbol || !modalQty || !modalPrice) return;
     
     const newAsset = {
       symbol: modalSymbol.toUpperCase(),
@@ -691,7 +810,7 @@ export default function App() {
       dateAdded: new Date().toISOString().split('T')[0]
     };
 
-    await addAsset(user.uid, newAsset);
+    await addAsset(DEFAULT_USER_ID, newAsset);
     setShowAddModal(false);
     addLog(`Asset ${newAsset.symbol} initialized in Neural Database.`, "success");
     setModalSymbol('');
@@ -700,68 +819,30 @@ export default function App() {
   };
 
   const handleRemoveAsset = async (id: string) => {
-    if (!user) return;
     const asset = portfolio.find(a => a.id === id);
-    await deleteAsset(user.uid, id);
+    await deleteAsset(DEFAULT_USER_ID, id);
     addLog(`Asset ${asset?.symbol} purged from Neural Database.`, "warn");
   };
 
-  const handleLogin = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-      addLog("Terminal Access Granted via Google Auth.", "success");
-    } catch (e) {
-      addLog("Auth Failed: Connection Interrupted.", "error");
-    }
-  };
-
-  const handleLogout = async () => {
-    await signOut(auth);
-    addLog("Terminal Session Terminated.", "warn");
-  };
-
-  if (!isAuthReady) return null;
-
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="bg-slate-900 border border-slate-800 p-10 rounded-[3rem] w-full max-w-md text-center shadow-2xl relative overflow-hidden"
-        >
-          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-500" />
-          <div className="w-24 h-24 bg-cyan-500/10 rounded-[2rem] flex items-center justify-center mx-auto mb-10 shadow-lg shadow-cyan-500/5">
-            <Shield className="text-cyan-400" size={48} />
-          </div>
-          <h1 className="text-4xl font-black text-white mb-3 tracking-tighter uppercase">Wealth AI</h1>
-          <p className="text-slate-400 text-sm mb-12 font-medium uppercase tracking-widest">Advanced Neural Trading Terminal</p>
-          
-          <div className="space-y-4">
-            <button 
-              onClick={handleLogin}
-              className="w-full bg-white text-slate-950 font-black py-5 rounded-2xl transition-all shadow-xl flex items-center justify-center gap-4 hover:bg-slate-100 active:scale-95"
-            >
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-6 h-6" alt="Google" />
-              Sign in with Google
-            </button>
-            <p className="text-[10px] text-slate-600 font-bold uppercase tracking-widest">Secure Multi-Factor Authentication</p>
-          </div>
-        </motion.div>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-cyan-500/30 pb-32 lg:pb-0 relative overflow-x-hidden">
+    <div className={`min-h-screen ${threatAlert ? 'bg-red-950/40' : 'bg-slate-950'} text-slate-200 font-sans selection:bg-cyan-500/30 pb-32 lg:pb-0 relative overflow-x-hidden transition-colors duration-1000`}>
+      {/* Threat Alert Banner */}
+      {threatAlert && (
+        <div className="fixed top-0 left-0 right-0 bg-red-600 text-white font-black text-center py-2 z-[100] uppercase tracking-widest text-xs animate-pulse shadow-[0_0_20px_rgba(220,38,38,0.8)]">
+          <AlertTriangle size={14} className="inline mr-2 -mt-1" />
+          SYSTEMIC THREAT DETECTED IN MARKET DATA. HIGH VOLATILITY PROTOCOLS ENGAGED.
+        </div>
+      )}
+
       {/* Scanline Effect */}
       <div className="scanline" />
       <div className="fixed inset-0 data-grid-bg pointer-events-none opacity-20" />
 
       {/* Hidden Audio Element */}
+      <audio id="tts-audio" className="hidden" />
       
       {/* Header */}
-      <header className="sticky top-0 z-50 bg-slate-950/80 backdrop-blur-xl border-b border-slate-800">
+      <header className={`sticky ${threatAlert ? 'top-8' : 'top-0'} z-50 bg-slate-950/80 backdrop-blur-xl border-b border-slate-800 transition-all duration-300`}>
         <div className="container mx-auto px-4 h-20 flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className="w-12 h-12 bg-cyan-600 rounded-2xl flex items-center justify-center shadow-lg shadow-cyan-900/40">
@@ -802,10 +883,9 @@ export default function App() {
               <div className="text-base font-black text-emerald-400 font-mono">₹{usdInr.toFixed(3)}</div>
             </div>
             <div className="flex items-center gap-3 bg-slate-900 p-1.5 rounded-2xl border border-slate-800">
-              <img src={user.photoURL || ''} className="w-8 h-8 rounded-xl" alt="User" />
-              <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-400 transition-all">
-                <LogOut size={18} />
-              </button>
+              <div className="p-2 text-slate-400">
+                <Shield size={18} className="text-cyan-500" />
+              </div>
             </div>
           </div>
         </div>
@@ -1625,7 +1705,7 @@ export default function App() {
       {/* Floating Chat Button */}
       <button 
         onClick={() => setShowChat(true)}
-        className="fixed bottom-24 right-28 w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 text-white rounded-full flex items-center justify-center shadow-2xl shadow-indigo-900/40 z-40 active:scale-95 transition-all"
+        className="fixed bottom-24 right-6 lg:right-28 w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 text-white rounded-full flex items-center justify-center shadow-2xl shadow-indigo-900/40 z-40 active:scale-95 transition-all"
       >
         <Sparkles size={32} />
       </button>
@@ -1633,10 +1713,33 @@ export default function App() {
       {/* Floating Action Button (Mobile) */}
       <button 
         onClick={() => setShowAddModal(true)}
-        className="lg:hidden fixed bottom-24 right-6 w-16 h-16 bg-gradient-to-br from-cyan-500 to-blue-600 text-white rounded-full flex items-center justify-center shadow-2xl shadow-cyan-900/40 z-40 active:scale-95 transition-all"
+        className="lg:hidden fixed bottom-44 right-6 w-16 h-16 bg-gradient-to-br from-cyan-500 to-blue-600 text-white rounded-full flex items-center justify-center shadow-2xl shadow-cyan-900/40 z-40 active:scale-95 transition-all"
       >
         <Plus size={32} />
       </button>
+
+      {/* Mobile Bottom Nav */}
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-slate-950/90 backdrop-blur-xl border-t border-slate-800 z-50 flex justify-around items-center p-4 pb-safe">
+        {[
+          { id: 'dashboard', icon: LayoutDashboard, label: 'Dash' },
+          { id: 'portfolio', icon: Briefcase, label: 'Port' },
+          { id: 'planner', icon: Target, label: 'Plan' },
+          { id: 'macro', icon: Globe, label: 'Macro' }
+        ].map(tab => {
+          const Icon = tab.icon;
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`flex flex-col items-center gap-1 transition-all ${isActive ? 'text-cyan-400' : 'text-slate-500'}`}
+            >
+              <Icon size={20} />
+              <span className="text-[9px] font-black uppercase tracking-widest">{tab.label}</span>
+            </button>
+          );
+        })}
+      </nav>
     </div>
   );
 }
