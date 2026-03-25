@@ -61,7 +61,7 @@ import {
   PolarAngleAxis,
   PolarRadiusAxis
 } from 'recharts';
-import { GoogleGenAI, ThinkingLevel, Modality } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Modality, FunctionDeclaration, Type } from "@google/genai";
 import { 
   db, 
   collections,
@@ -185,8 +185,32 @@ const formatINR = (val: number) => `₹${Math.round(val).toLocaleString('en-IN')
 
 const guessMarket = (sym: string): 'IN' | 'US' => {
   const s = sym.toUpperCase();
-  if (s.includes('.NS') || s.includes('.BO') || s.includes('BEES')) return 'IN';
+  if (
+    s.includes('.NS') || 
+    s.includes('.BO') || 
+    s.includes('BEES') || 
+    s.includes('MOMOMENTUM') || 
+    s.includes('NIFTY') || 
+    s.includes('SENSEX') ||
+    s.includes('SMALLCAP') ||
+    s.includes('MIDCAP')
+  ) return 'IN';
   return 'US';
+};
+
+const getFinancialNews: FunctionDeclaration = {
+  name: "getFinancialNews",
+  description: "Fetch the latest financial news articles and headlines for a specific asset, stock, crypto, or general market trend. Use this to analyze sentiment and provide informed responses.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      query: {
+        type: Type.STRING,
+        description: "The search query, e.g., 'AAPL', 'Bitcoin', 'Indian Stock Market', 'Nifty 50'"
+      }
+    },
+    required: ["query"]
+  }
 };
 
 // --- Main Component ---
@@ -441,19 +465,63 @@ export default function App() {
         - You have access to real-time market data and global risk indicators.
         - Provide actionable insights, not just generic advice.
         - If asked about specific stocks/crypto, provide a 'Neural Verdict' with risk/reward ratios.
-        - Use search grounding for up-to-the-minute news.`,
-        tools: [{ googleSearch: {} }]
+        - Use search grounding for up-to-the-minute news.
+        - When asked about market trends or specific assets, ALWAYS use the getFinancialNews tool to fetch recent articles, summarize them, and analyze the sentiment from the headlines.`,
+        tools: [
+          { googleSearch: {} },
+          { functionDeclarations: [getFinancialNews] }
+        ],
+        toolConfig: { includeServerSideToolInvocations: true }
       };
 
       if (isComplex) {
         config.thinkingConfig = { thinkingLevel: ThinkingLevel.HIGH };
       }
 
-      const response = await ai.models.generateContent({
+      const formattedContents = [...chatMessages, { role: 'user', text: prompt }].map(msg => ({
+        role: msg.role === 'model' ? 'model' : 'user',
+        parts: [{ text: msg.text }]
+      }));
+
+      let response = await ai.models.generateContent({
         model: modelName,
-        contents: [...chatMessages, { role: 'user', text: prompt }],
+        contents: formattedContents,
         config
       });
+
+      if (response.functionCalls && response.functionCalls.length > 0) {
+        const call = response.functionCalls[0];
+        if (call.name === 'getFinancialNews') {
+          const args = call.args as any;
+          addLog(`Fetching neural news streams for ${args.query}...`, 'info');
+          try {
+            const newsRes = await fetch(`/api/news/${encodeURIComponent(args.query)}`);
+            const newsData = await newsRes.json();
+            
+            const previousContent = response.candidates?.[0]?.content;
+            if (previousContent) {
+              formattedContents.push(previousContent as any);
+            }
+            formattedContents.push({
+              role: 'user',
+              parts: [{
+                functionResponse: {
+                  name: 'getFinancialNews',
+                  response: { news: newsData }
+                }
+              }]
+            } as any);
+
+            response = await ai.models.generateContent({
+              model: modelName,
+              contents: formattedContents,
+              config
+            });
+          } catch (e) {
+            console.error("News fetch error", e);
+          }
+        }
+      }
 
       const aiText = response.text || "I'm sorry, I couldn't process that request.";
       await addChatMessage(DEFAULT_USER_ID, 'model', aiText);
@@ -586,6 +654,29 @@ export default function App() {
     const timer = setInterval(fetchPrices, 60000);
     return () => clearInterval(timer);
   }, [portfolio, currentSymbol]);
+
+  // Ultra-fast 100ms simulated tick for the "matrix" feel
+  useEffect(() => {
+    const fastTimer = setInterval(() => {
+      setLivePrices(prev => {
+        const next = { ...prev };
+        let changed = false;
+        for (const key in next) {
+          if (next[key] && next[key].price > 0) {
+            // Random jitter between -0.005% and +0.005%
+            const jitter = 1 + (Math.random() - 0.5) * 0.0001;
+            next[key] = {
+              ...next[key],
+              price: next[key].price * jitter
+            };
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 100); // 100ms feels ultra-fast
+    return () => clearInterval(fastTimer);
+  }, []);
 
   // --- Calculations ---
   const totals = useMemo(() => {
