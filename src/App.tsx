@@ -64,15 +64,8 @@ import {
 } from 'recharts';
 import { GoogleGenAI, ThinkingLevel, Modality } from "@google/genai";
 import { 
-  auth, 
   db, 
-  googleProvider, 
-  signInWithPopup, 
-  signOut, 
-  onAuthStateChanged, 
-  FirebaseUser,
   collections,
-  saveUser,
   addAsset,
   deleteAsset,
   addLog as addFirestoreLog,
@@ -199,8 +192,6 @@ const guessMarket = (sym: string): 'IN' | 'US' => {
 
 // --- Main Component ---
 export default function App() {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'portfolio' | 'planner' | 'macro'>('dashboard');
   const [portfolio, setPortfolio] = useState<Asset[]>([]);
   const [livePrices, setLivePrices] = useState<Record<string, PriceData>>({});
@@ -223,10 +214,10 @@ export default function App() {
   const [chartData, setChartData] = useState<{time: number, price: number}[]>([]);
   const [timeframe, setTimeframe] = useState('1D');
   
+  const DEFAULT_USER_ID = 'default_user';
+  
   // --- WebSocket Connection ---
   useEffect(() => {
-    if (!user) return;
-    
     // Clear chart data when symbol changes to prevent flickering old data
     setChartData([]);
     
@@ -286,7 +277,7 @@ export default function App() {
       }
       ws.close();
     };
-  }, [currentSymbol, user, timeframe]);
+  }, [currentSymbol, timeframe]);
 
   // Planner State
   const [sipAmount, setSipAmount] = useState(50000);
@@ -294,44 +285,21 @@ export default function App() {
   const [expectedReturn, setExpectedReturn] = useState(15);
 
   const addLog = (msg: string, type: LogEntry['type'] = 'info') => {
-    if (user) {
-      addFirestoreLog(user.uid, msg, type);
-    } else {
-      const newLog: LogEntry = {
-        id: Math.random().toString(36).substr(2, 9),
-        msg,
-        type,
-        time: new Date().toLocaleTimeString([], { hour12: false })
-      };
-      setLogs(prev => [newLog, ...prev].slice(0, 50));
-    }
+    addFirestoreLog(DEFAULT_USER_ID, msg, type);
   };
 
-  // --- Auth & Firestore Sync ---
+  // --- Firestore Sync ---
   useEffect(() => {
     testConnection();
   }, []);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setIsAuthReady(true);
-      if (u) {
-        saveUser(u.uid, { displayName: u.displayName, email: u.email });
-      }
-    });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!user) return;
-
-    const unsubPortfolio = onSnapshot(collections.portfolio(user.uid), (snapshot) => {
+    const unsubPortfolio = onSnapshot(collections.portfolio(DEFAULT_USER_ID), (snapshot) => {
       const assets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Asset));
       setPortfolio(assets);
     });
 
-    const unsubLogs = onSnapshot(query(collections.logs(user.uid)), (snapshot) => {
+    const unsubLogs = onSnapshot(query(collections.logs(DEFAULT_USER_ID)), (snapshot) => {
       const newLogs = snapshot.docs.map(doc => {
         const data = doc.data();
         return {
@@ -344,7 +312,7 @@ export default function App() {
       setLogs(newLogs.slice(0, 50));
     });
 
-    const unsubChat = onSnapshot(query(collections.chatHistory(user.uid)), (snapshot) => {
+    const unsubChat = onSnapshot(query(collections.chatHistory(DEFAULT_USER_ID)), (snapshot) => {
       const history = snapshot.docs.map(doc => doc.data() as {role: string, text: string, timestamp: string})
         .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
         .map(({role, text}) => ({role, text}));
@@ -356,12 +324,12 @@ export default function App() {
       unsubLogs();
       unsubChat();
     };
-  }, [user]);
+  }, []);
 
   // --- Neural Scan Logic ---
   const handleNeuralScan = async () => {
     const targetSymbol = searchInput.trim() ? searchInput.trim().toUpperCase() : currentSymbol;
-    if (!targetSymbol || !user) return;
+    if (!targetSymbol) return;
     
     if (targetSymbol !== currentSymbol) {
       setCurrentSymbol(targetSymbol);
@@ -452,11 +420,11 @@ export default function App() {
 
   // --- Gemini AI Logic ---
   const handleChat = async () => {
-    if (!chatInput.trim() || !user) return;
+    if (!chatInput.trim()) return;
 
     const prompt = chatInput;
     setChatInput('');
-    await addChatMessage(user.uid, 'user', prompt);
+    await addChatMessage(DEFAULT_USER_ID, 'user', prompt);
     setIsThinking(true);
 
     try {
@@ -489,10 +457,10 @@ export default function App() {
       });
 
       const aiText = response.text || "I'm sorry, I couldn't process that request.";
-      await addChatMessage(user.uid, 'model', aiText);
+      await addChatMessage(DEFAULT_USER_ID, 'model', aiText);
     } catch (e) {
       console.error("Gemini Error:", e);
-      await addChatMessage(user.uid, 'model', "System error: Neural link unstable. Please try again.");
+      await addChatMessage(DEFAULT_USER_ID, 'model', "System error: Neural link unstable. Please try again.");
     } finally {
       setIsThinking(false);
     }
@@ -500,7 +468,7 @@ export default function App() {
 
   // --- Sync Logic ---
   const fetchPrices = async () => {
-    if (isSyncing || !user) return;
+    if (isSyncing) return;
     setIsSyncing(true);
     addLog(`Initiating Neural Sync for ${portfolio.length + 1} instruments...`, 'info');
     
@@ -615,12 +583,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (user) {
-      fetchPrices();
-      const timer = setInterval(fetchPrices, 60000);
-      return () => clearInterval(timer);
-    }
-  }, [user, portfolio, currentSymbol]);
+    fetchPrices();
+    const timer = setInterval(fetchPrices, 60000);
+    return () => clearInterval(timer);
+  }, [portfolio, currentSymbol]);
 
   // --- Calculations ---
   const totals = useMemo(() => {
@@ -680,7 +646,7 @@ export default function App() {
 
   // --- Handlers ---
   const handleAddAsset = async () => {
-    if (!modalSymbol || !modalQty || !modalPrice || !user) return;
+    if (!modalSymbol || !modalQty || !modalPrice) return;
     
     const newAsset = {
       symbol: modalSymbol.toUpperCase(),
@@ -691,7 +657,7 @@ export default function App() {
       dateAdded: new Date().toISOString().split('T')[0]
     };
 
-    await addAsset(user.uid, newAsset);
+    await addAsset(DEFAULT_USER_ID, newAsset);
     setShowAddModal(false);
     addLog(`Asset ${newAsset.symbol} initialized in Neural Database.`, "success");
     setModalSymbol('');
@@ -700,29 +666,20 @@ export default function App() {
   };
 
   const handleRemoveAsset = async (id: string) => {
-    if (!user) return;
     const asset = portfolio.find(a => a.id === id);
-    await deleteAsset(user.uid, id);
+    await deleteAsset(DEFAULT_USER_ID, id);
     addLog(`Asset ${asset?.symbol} purged from Neural Database.`, "warn");
   };
 
   const handleLogin = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-      addLog("Terminal Access Granted via Google Auth.", "success");
-    } catch (e) {
-      addLog("Auth Failed: Connection Interrupted.", "error");
-    }
+    addLog("Terminal Access Granted.", "success");
   };
 
   const handleLogout = async () => {
-    await signOut(auth);
     addLog("Terminal Session Terminated.", "warn");
   };
 
-  if (!isAuthReady) return null;
-
-  if (!user) {
+  if (false) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
         <motion.div 
@@ -802,7 +759,6 @@ export default function App() {
               <div className="text-base font-black text-emerald-400 font-mono">₹{usdInr.toFixed(3)}</div>
             </div>
             <div className="flex items-center gap-3 bg-slate-900 p-1.5 rounded-2xl border border-slate-800">
-              <img src={user.photoURL || ''} className="w-8 h-8 rounded-xl" alt="User" />
               <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-400 transition-all">
                 <LogOut size={18} />
               </button>
