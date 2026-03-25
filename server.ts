@@ -54,6 +54,26 @@ async function getNseCookies() {
   }
 }
 
+app.get('/api/news/:query', async (req, res) => {
+  try {
+    const query = encodeURIComponent(req.params.query);
+    const response = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${query}&newsCount=10`);
+    if (!response.ok) throw new Error(`Yahoo Finance API returned ${response.status}`);
+    const data = await response.json();
+    const news = data.news || [];
+    const formattedNews = news.map((n: any) => ({
+      title: n.title,
+      publisher: n.publisher,
+      link: n.link,
+      time: n.providerPublishTime ? new Date(n.providerPublishTime * 1000).toISOString() : new Date().toISOString()
+    }));
+    res.json(formattedNews);
+  } catch (e) {
+    console.error('News fetch error', e);
+    res.status(500).json({ error: 'Failed to fetch news' });
+  }
+});
+
 app.get('/api/nse/quote/:symbol', async (req, res) => {
   let symbol = req.params.symbol.replace('.NS', '').toUpperCase();
   
@@ -231,8 +251,15 @@ setInterval(async () => {
   
   for (const symbol of activeSymbols) {
     try {
-      // Determine market (simple heuristic: if it ends with .NS or .BO, or is in a known list, it's IN)
-      const isIN = symbol.endsWith('.NS') || symbol.endsWith('.BO') || symbol === 'NIFTYBEES' || symbol === 'BANKBEES';
+      const s = symbol.toUpperCase();
+      const isIN = s.endsWith('.NS') || 
+                   s.endsWith('.BO') || 
+                   s.includes('BEES') || 
+                   s.includes('MOMOMENTUM') || 
+                   s.includes('NIFTY') || 
+                   s.includes('SENSEX') ||
+                   s.includes('SMALLCAP') ||
+                   s.includes('MIDCAP');
       const cleanSym = symbol.replace('.NS', '').replace('.BO', '');
       
       let price = 0;
@@ -313,7 +340,7 @@ setInterval(async () => {
       console.error(`WS Polling Error for ${symbol}:`, e);
     }
   }
-}, 5000); // Poll every 5 seconds
+}, 1000); // Poll every 1 second for ultra-fast updates
 
 // Vite middleware
 async function startServer() {
