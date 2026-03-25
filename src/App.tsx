@@ -28,7 +28,6 @@ import {
   ChevronRight,
   PieChart as PieChartIcon,
   BarChart3,
-  LogOut,
   User as UserIcon,
   Send,
   Sparkles,
@@ -671,44 +670,6 @@ export default function App() {
     addLog(`Asset ${asset?.symbol} purged from Neural Database.`, "warn");
   };
 
-  const handleLogin = async () => {
-    addLog("Terminal Access Granted.", "success");
-  };
-
-  const handleLogout = async () => {
-    addLog("Terminal Session Terminated.", "warn");
-  };
-
-  if (false) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="bg-slate-900 border border-slate-800 p-10 rounded-[3rem] w-full max-w-md text-center shadow-2xl relative overflow-hidden"
-        >
-          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-500" />
-          <div className="w-24 h-24 bg-cyan-500/10 rounded-[2rem] flex items-center justify-center mx-auto mb-10 shadow-lg shadow-cyan-500/5">
-            <Shield className="text-cyan-400" size={48} />
-          </div>
-          <h1 className="text-4xl font-black text-white mb-3 tracking-tighter uppercase">Wealth AI</h1>
-          <p className="text-slate-400 text-sm mb-12 font-medium uppercase tracking-widest">Advanced Neural Trading Terminal</p>
-          
-          <div className="space-y-4">
-            <button 
-              onClick={handleLogin}
-              className="w-full bg-white text-slate-950 font-black py-5 rounded-2xl transition-all shadow-xl flex items-center justify-center gap-4 hover:bg-slate-100 active:scale-95"
-            >
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-6 h-6" alt="Google" />
-              Sign in with Google
-            </button>
-            <p className="text-[10px] text-slate-600 font-bold uppercase tracking-widest">Secure Multi-Factor Authentication</p>
-          </div>
-        </motion.div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-cyan-500/30 pb-32 lg:pb-0 relative overflow-x-hidden">
       {/* Scanline Effect */}
@@ -759,9 +720,9 @@ export default function App() {
               <div className="text-base font-black text-emerald-400 font-mono">₹{usdInr.toFixed(3)}</div>
             </div>
             <div className="flex items-center gap-3 bg-slate-900 p-1.5 rounded-2xl border border-slate-800">
-              <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-400 transition-all">
-                <LogOut size={18} />
-              </button>
+              <div className="p-2 text-slate-400">
+                <Shield size={18} className="text-cyan-500" />
+              </div>
             </div>
           </div>
         </div>
