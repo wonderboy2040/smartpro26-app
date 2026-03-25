@@ -9,13 +9,36 @@ const PORT = 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+app.get('/api/portfolio', async (req, res) => {
+  try {
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    if (!spreadsheetId) {
+      return res.status(400).json({ error: 'GOOGLE_SHEET_ID not configured' });
+    }
+    
+    // Fetch as CSV
+    const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:csv&sheet=Sheet1`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Failed to fetch sheet');
+    
+    const csvText = await response.text();
+    // Simple CSV parser (assuming no commas in values)
+    const rows = csvText.split('\n').map(row => row.split(',').map(cell => cell.replace(/"/g, '')));
+    
+    res.json(rows);
+  } catch (error) {
+    console.error('Google Sheets Fetch Error:', error);
+    res.status(500).json({ error: 'Failed to fetch from Google Sheets' });
+  }
+});
+
 // --- NSE API Helper ---
 let nseCookies = '';
 const nseHeaders = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': '*/*',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
-  'Referer': 'https://www.nseindia.com/',
+  'Referer': 'https://www.nseindia.com/get-quotes/equity?symbol=NIFTY',
   'Origin': 'https://www.nseindia.com'
 };
 
@@ -42,13 +65,18 @@ app.get('/api/nse/quote/:symbol', async (req, res) => {
     });
     
     if (response.status === 401 || response.status === 403) {
+      console.log('NSE API returned', response.status, 'refreshing cookies');
       await getNseCookies();
       response = await fetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`, {
         headers: { ...nseHeaders, 'Cookie': nseCookies }
       });
     }
     
-    if (!response.ok) throw new Error(`NSE API returned ${response.status}`);
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(`NSE API returned ${response.status}: ${text}`);
+      throw new Error(`NSE API returned ${response.status}`);
+    }
     const data = await response.json();
     res.json(data);
   } catch (error) {
@@ -96,30 +124,33 @@ app.get('/api/nse/chart/:symbol', async (req, res) => {
 app.get('/api/us/quote/:symbol', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   try {
-    const response = await fetch(`https://api.nasdaq.com/api/quote/${symbol}/info?assetclass=etf`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Origin': 'https://www.nasdaq.com',
-        'Referer': 'https://www.nasdaq.com/'
+    const fetchWithRetry = async (assetClass: string) => {
+      const response = await fetch(`https://api.nasdaq.com/api/quote/${symbol}/info?assetclass=${assetClass}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Origin': 'https://www.nasdaq.com',
+          'Referer': 'https://www.nasdaq.com/'
+        }
+      });
+      if (!response.ok) throw new Error(`Nasdaq API returned ${response.status}`);
+      
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Response is not JSON');
       }
-    });
-    if (!response.ok) {
-        // Fallback to stock if ETF fails
-        const stockResponse = await fetch(`https://api.nasdaq.com/api/quote/${symbol}/info?assetclass=stocks`, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': 'application/json, text/plain, */*',
-              'Origin': 'https://www.nasdaq.com',
-              'Referer': 'https://www.nasdaq.com/'
-            }
-          });
-        if (!stockResponse.ok) throw new Error(`Nasdaq API returned ${stockResponse.status}`);
-        const data = await stockResponse.json();
-        return res.json(data);
+      
+      return await response.json();
+    };
+
+    try {
+      const data = await fetchWithRetry('etf');
+      res.json(data);
+    } catch (e) {
+      // Fallback to stock
+      const data = await fetchWithRetry('stocks');
+      res.json(data);
     }
-    const data = await response.json();
-    res.json(data);
   } catch (error) {
     console.error('US Fetch Error:', error);
     res.status(500).json({ error: 'Failed to fetch from US Market' });
