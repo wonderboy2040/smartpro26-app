@@ -52,8 +52,19 @@ app.get('/api/news/:query', async (req, res) => {
   }
 });
 
+const quoteCache = new Map<string, { data: any, timestamp: number }>();
+const CACHE_TTL = 60000; // 60 seconds cache
+
 app.get('/api/nse/quote/:symbol', async (req, res) => {
   let symbol = req.params.symbol.replace('.NS', '').toUpperCase();
+  const cacheKey = `IN_${symbol}`;
+  
+  if (quoteCache.has(cacheKey)) {
+    const cached = quoteCache.get(cacheKey)!;
+    if (Date.now() - cached.timestamp < CACHE_TTL) {
+      return res.json(cached.data);
+    }
+  }
   
   try {
     const response = await fetch('https://scanner.tradingview.com/india/scan', {
@@ -64,6 +75,13 @@ app.get('/api/nse/quote/:symbol', async (req, res) => {
         columns: ["close", "change", "change_abs", "high", "low", "open", "volume", "VWAP"]
       })
     });
+    
+    if (response.status === 429) {
+      if (quoteCache.has(cacheKey)) {
+        return res.json(quoteCache.get(cacheKey)!.data); // Serve stale cache on 429
+      }
+      return res.status(429).json({ error: 'TradingView API rate limited' });
+    }
     
     if (!response.ok) throw new Error(`TradingView API returned ${response.status}`);
     const data = await response.json();
@@ -92,6 +110,7 @@ app.get('/api/nse/quote/:symbol', async (req, res) => {
       }
     };
     
+    quoteCache.set(cacheKey, { data: mappedData, timestamp: Date.now() });
     res.json(mappedData);
   } catch (error) {
     console.error('TradingView NSE Fetch Error:', error);
@@ -102,6 +121,15 @@ app.get('/api/nse/quote/:symbol', async (req, res) => {
 // --- US API Helper (TradingView) ---
 app.get('/api/us/quote/:symbol', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
+  const cacheKey = `US_${symbol}`;
+  
+  if (quoteCache.has(cacheKey)) {
+    const cached = quoteCache.get(cacheKey)!;
+    if (Date.now() - cached.timestamp < CACHE_TTL) {
+      return res.json(cached.data);
+    }
+  }
+  
   try {
     const response = await fetch('https://scanner.tradingview.com/america/scan', {
       method: 'POST',
@@ -111,6 +139,13 @@ app.get('/api/us/quote/:symbol', async (req, res) => {
         columns: ["close", "change", "change_abs", "high", "low", "open", "volume", "VWAP"]
       })
     });
+    
+    if (response.status === 429) {
+      if (quoteCache.has(cacheKey)) {
+        return res.json(quoteCache.get(cacheKey)!.data); // Serve stale cache on 429
+      }
+      return res.status(429).json({ error: 'TradingView API rate limited' });
+    }
     
     if (!response.ok) throw new Error(`TradingView API returned ${response.status}`);
     const data = await response.json();
@@ -131,6 +166,8 @@ app.get('/api/us/quote/:symbol', async (req, res) => {
         }
       }
     };
+    
+    quoteCache.set(cacheKey, { data: mappedData, timestamp: Date.now() });
     res.json(mappedData);
   } catch (error) {
     console.error('TradingView US Fetch Error:', error);
@@ -230,8 +267,11 @@ function isMarketOpen(market: 'IN' | 'US') {
 }
 
 // Polling loop for real-time updates
-setInterval(async () => {
-  if (activeSymbols.size === 0) return;
+async function pollTradingView() {
+  if (activeSymbols.size === 0) {
+    setTimeout(pollTradingView, 60000);
+    return;
+  }
   
   const inSymbols: string[] = [];
   const usSymbols: string[] = [];
@@ -255,105 +295,121 @@ setInterval(async () => {
   console.log('Processing Symbols:', { inSymbols, usSymbols });
   
   try {
-    // Fetch IN symbols
+    // Fetch IN symbols in batches of 5 to reduce load
     if (inSymbols.length > 0 && isMarketOpen('IN')) {
-      const tickers = inSymbols.flatMap(s => {
-        const cleanSym = s.replace('.NS', '').replace('.BO', '');
-        return [`NSE:${cleanSym}`, `BSE:${cleanSym}`];
-      });
-      
-      const res = await fetch('https://scanner.tradingview.com/india/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbols: { tickers },
-          columns: ["name", "close", "change", "volume"]
-        })
-      });
-      
-      if (res.status === 429) {
-        console.warn('TradingView India Scan: Rate limited (429). Backing off for 60s.');
-        await new Promise(resolve => setTimeout(resolve, 60000));
-      } else if (res.ok) {
-        const data = await res.json();
-        if (data.data) {
-          for (const item of data.data) {
-            const name = item.d[0]; // name is the first column
-            const price = item.d[1];
-            const change = item.d[2];
-            const volume = item.d[3];
-            
-            // Find the original symbol
-            const originalSym = inSymbols.find(s => s.replace('.NS', '').replace('.BO', '') === name);
-            if (originalSym && price > 0) {
-              const msg = JSON.stringify({
-                type: 'tick',
-                symbol: originalSym,
-                price,
-                change,
-                volume,
-                time: Date.now()
-              });
-              for (const [ws, subs] of subscriptions.entries()) {
-                if (subs.has(originalSym) && ws.readyState === WebSocket.OPEN) {
-                  ws.send(msg);
+      for (let i = 0; i < inSymbols.length; i += 5) {
+        const batch = inSymbols.slice(i, i + 5);
+        const tickers = batch.flatMap(s => {
+          const cleanSym = s.replace('.NS', '').replace('.BO', '');
+          return [`NSE:${cleanSym}`, `BSE:${cleanSym}`];
+        });
+        
+        const res = await fetch('https://scanner.tradingview.com/india/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbols: { tickers },
+            columns: ["name", "close", "change", "volume"]
+          })
+        });
+        
+        if (res.status === 429) {
+          console.warn('TradingView India Scan: Rate limited (429). Backing off.');
+          await new Promise(resolve => setTimeout(resolve, 60000));
+        } else if (res.ok) {
+          const data = await res.json();
+          if (data.data) {
+            for (const item of data.data) {
+              const name = item.d[0];
+              const price = item.d[1];
+              const change = item.d[2];
+              const volume = item.d[3];
+              
+              const originalSym = batch.find(s => s.replace('.NS', '').replace('.BO', '') === name);
+              if (originalSym && price > 0) {
+                const msg = JSON.stringify({
+                  type: 'tick',
+                  symbol: originalSym,
+                  price,
+                  change,
+                  volume,
+                  time: Date.now()
+                });
+                for (const [ws, subs] of subscriptions.entries()) {
+                  if (subs.has(originalSym) && ws.readyState === WebSocket.OPEN) {
+                    ws.send(msg);
+                  }
                 }
               }
             }
           }
         }
+        // Small delay between batches
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
     }
     
-    // Fetch US symbols
+    // Fetch US symbols in batches of 5
     if (usSymbols.length > 0 && isMarketOpen('US')) {
-      const tickers = usSymbols.flatMap(s => [`NASDAQ:${s}`, `NYSE:${s}`, `AMEX:${s}`]);
-      
-      const res = await fetch('https://scanner.tradingview.com/america/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbols: { tickers },
-          columns: ["name", "close", "change", "volume"]
-        })
-      });
-      
-      if (res.status === 429) {
-        console.warn('TradingView US Scan: Rate limited (429). Backing off for 60s.');
-        await new Promise(resolve => setTimeout(resolve, 60000));
-      } else if (res.ok) {
-        const data = await res.json();
-        if (data.data) {
-          for (const item of data.data) {
-            const name = item.d[0];
-            const price = item.d[1];
-            const change = item.d[2];
-            const volume = item.d[3];
-            
-            const originalSym = usSymbols.find(s => s === name);
-            if (originalSym && price > 0) {
-              const msg = JSON.stringify({
-                type: 'tick',
-                symbol: originalSym,
-                price,
-                change,
-                volume,
-                time: Date.now()
-              });
-              for (const [ws, subs] of subscriptions.entries()) {
-                if (subs.has(originalSym) && ws.readyState === WebSocket.OPEN) {
-                  ws.send(msg);
+      for (let i = 0; i < usSymbols.length; i += 5) {
+        const batch = usSymbols.slice(i, i + 5);
+        const tickers = batch.flatMap(s => [`NASDAQ:${s}`, `NYSE:${s}`, `AMEX:${s}`]);
+        
+        const res = await fetch('https://scanner.tradingview.com/america/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbols: { tickers },
+            columns: ["name", "close", "change", "volume"]
+          })
+        });
+        
+        if (res.status === 429) {
+          console.warn('TradingView US Scan: Rate limited (429). Backing off.');
+          await new Promise(resolve => setTimeout(resolve, 60000));
+        } else if (res.ok) {
+          const data = await res.json();
+          if (data.data) {
+            for (const item of data.data) {
+              const name = item.d[0];
+              const price = item.d[1];
+              const change = item.d[2];
+              const volume = item.d[3];
+              
+              const originalSym = batch.find(s => s === name);
+              if (originalSym && price > 0) {
+                const msg = JSON.stringify({
+                  type: 'tick',
+                  symbol: originalSym,
+                  price,
+                  change,
+                  volume,
+                  time: Date.now()
+                });
+                for (const [ws, subs] of subscriptions.entries()) {
+                  if (subs.has(originalSym) && ws.readyState === WebSocket.OPEN) {
+                    ws.send(msg);
+                  }
                 }
               }
             }
           }
         }
+        // Small delay between batches
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
     }
   } catch (e) {
     console.error('TradingView WS Polling Error:', e);
   }
-}, 60000); // Poll every 60 seconds to be much safer
+  
+  // Schedule next poll with jitter (60s to 90s)
+  const nextPoll = 60000 + Math.random() * 30000;
+  setTimeout(pollTradingView, nextPoll);
+}
+
+// Start polling
+pollTradingView();
 
 // Vite middleware
 async function startServer() {
