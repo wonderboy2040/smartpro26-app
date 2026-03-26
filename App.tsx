@@ -65,52 +65,54 @@ import { GoogleGenAI, ThinkingLevel, Modality, FunctionDeclaration, Type } from 
 
 // --- TradingView Widget Component ---
 function TradingViewWidget({ symbol, market }: { symbol: string, market: string }) {
-  const container = useRef<HTMLDivElement>(null);
+  const containerId = useRef(`tv_chart_${Math.random().toString(36).substring(7)}`);
 
   useEffect(() => {
-    if (!container.current) return;
-    
-    // Clear previous widget
-    container.current.innerHTML = '';
-    
-    const script = document.createElement("script");
-    script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
-    script.type = "text/javascript";
-    script.async = true;
-    script.onerror = () => {
-      console.error("TradingView widget failed to load.");
-      if (container.current) {
-        container.current.innerHTML = '<div class="text-slate-500 p-4">TradingView chart failed to load.</div>';
+    const tvSymbol = market === 'IN' ? `NSE:${symbol.replace('.NS', '').replace('.BO', '')}` : `NASDAQ:${symbol}`;
+    let widget: any = null;
+
+    const initWidget = () => {
+      if (typeof (window as any).TradingView !== 'undefined') {
+        widget = new (window as any).TradingView.widget({
+          autosize: true,
+          symbol: tvSymbol,
+          interval: "D",
+          timezone: "Etc/UTC",
+          theme: "dark",
+          style: "1",
+          locale: "en",
+          enable_publishing: false,
+          allow_symbol_change: true,
+          backgroundColor: "rgba(15, 23, 42, 1)",
+          gridColor: "rgba(30, 41, 59, 1)",
+          hide_top_toolbar: false,
+          hide_legend: false,
+          save_image: false,
+          container_id: containerId.current,
+        });
       }
     };
-    
-    const tvSymbol = market === 'IN' ? `NSE:${symbol.replace('.NS', '').replace('.BO', '')}` : `NASDAQ:${symbol}`;
-    
-    script.innerHTML = `
-      {
-        "autosize": true,
-        "symbol": "${tvSymbol}",
-        "interval": "D",
-        "timezone": "Etc/UTC",
-        "theme": "dark",
-        "style": "1",
-        "locale": "en",
-        "enable_publishing": false,
-        "allow_symbol_change": true,
-        "backgroundColor": "rgba(15, 23, 42, 1)",
-        "gridColor": "rgba(30, 41, 59, 1)",
-        "hide_top_toolbar": false,
-        "hide_legend": false,
-        "save_image": false,
-        "calendar": false,
-        "support_host": "https://www.tradingview.com"
-      }`;
-      
-    container.current.appendChild(script);
+
+    if (!document.getElementById('tradingview-widget-script')) {
+      const script = document.createElement('script');
+      script.id = 'tradingview-widget-script';
+      script.src = 'https://s3.tradingview.com/tv.js';
+      script.async = true;
+      script.onload = initWidget;
+      document.head.appendChild(script);
+    } else {
+      initWidget();
+    }
+
+    return () => {
+      if (widget && typeof widget.remove === 'function') {
+        widget.remove();
+      }
+    };
   }, [symbol, market]);
 
   return (
-    <div className="tradingview-widget-container" ref={container} style={{ height: "100%", width: "100%" }} />
+    <div id={containerId.current} className="tradingview-widget-container" style={{ height: "100%", width: "100%" }} />
   );
 }
 import { 
@@ -636,59 +638,67 @@ export default function App() {
 
       const fetchedPrices: Record<string, PriceData> = {};
       
-      await Promise.allSettled(symbols.map(async (sym) => {
-        try {
-          const mkt = guessMarket(sym);
-          const cleanSym = sym.replace('.NS', '').replace('.BO', '');
-          const key = `${mkt}_${sym}`;
-          
-          if (mkt === 'IN') {
-            const res = await fetch(`/api/nse/quote/${cleanSym}`);
-            if (res.ok) {
-              const data = await res.json();
-              const priceInfo = data.priceInfo || {};
-              fetchedPrices[key] = {
-                price: priceInfo.lastPrice || 0,
-                change: priceInfo.pChange || 0,
-                rsi: 50,
-                time: Date.now(),
-                market: 'IN',
-                fundamentals: {
-                  open: priceInfo.open,
-                  high: priceInfo.intraDayHighLow?.max,
-                  low: priceInfo.intraDayHighLow?.min,
-                  vwap: priceInfo.vwap,
-                  preMarket: data.preOpenMarket?.preopen?.[0]?.price,
-                  volume: data.preOpenMarket?.totalTradedVolume,
-                }
-              };
+      // Batch requests to avoid hammering the backend
+      for (let i = 0; i < symbols.length; i += 5) {
+        const batch = symbols.slice(i, i + 5);
+        await Promise.allSettled(batch.map(async (sym) => {
+          try {
+            const mkt = guessMarket(sym);
+            const cleanSym = sym.replace('.NS', '').replace('.BO', '');
+            const key = `${mkt}_${sym}`;
+            
+            if (mkt === 'IN') {
+              const res = await fetch(`/api/nse/quote/${cleanSym}`);
+              if (res.ok) {
+                const data = await res.json();
+                const priceInfo = data.priceInfo || {};
+                fetchedPrices[key] = {
+                  price: priceInfo.lastPrice || 0,
+                  change: priceInfo.pChange || 0,
+                  rsi: 50,
+                  time: Date.now(),
+                  market: 'IN',
+                  fundamentals: {
+                    open: priceInfo.open,
+                    high: priceInfo.intraDayHighLow?.max,
+                    low: priceInfo.intraDayHighLow?.min,
+                    vwap: priceInfo.vwap,
+                    preMarket: data.preOpenMarket?.preopen?.[0]?.price,
+                    volume: data.preOpenMarket?.totalTradedVolume,
+                  }
+                };
+              }
+            } else {
+              const res = await fetch(`/api/us/quote/${cleanSym}`);
+              if (res.ok) {
+                const data = await res.json();
+                const primaryData = data?.data?.primaryData || {};
+                const priceStr = primaryData.lastSalePrice?.replace('$', '') || '0';
+                const changeStr = primaryData.percentageChange?.replace('%', '') || '0';
+                fetchedPrices[key] = {
+                  price: parseFloat(priceStr) || 0,
+                  change: parseFloat(changeStr) || 0,
+                  rsi: 50,
+                  time: Date.now(),
+                  market: 'US',
+                  fundamentals: {
+                    open: parseFloat(data?.data?.primaryData?.openPrice?.replace('$', '')) || undefined,
+                    high: parseFloat(data?.data?.primaryData?.highPrice?.replace('$', '')) || undefined,
+                    low: parseFloat(data?.data?.primaryData?.lowPrice?.replace('$', '')) || undefined,
+                    volume: parseInt(data?.data?.primaryData?.volume?.replace(/,/g, '')) || undefined,
+                  }
+                };
+              }
             }
-          } else {
-            const res = await fetch(`/api/us/quote/${cleanSym}`);
-            if (res.ok) {
-              const data = await res.json();
-              const primaryData = data?.data?.primaryData || {};
-              const priceStr = primaryData.lastSalePrice?.replace('$', '') || '0';
-              const changeStr = primaryData.percentageChange?.replace('%', '') || '0';
-              fetchedPrices[key] = {
-                price: parseFloat(priceStr) || 0,
-                change: parseFloat(changeStr) || 0,
-                rsi: 50,
-                time: Date.now(),
-                market: 'US',
-                fundamentals: {
-                  open: parseFloat(data?.data?.primaryData?.openPrice?.replace('$', '')) || undefined,
-                  high: parseFloat(data?.data?.primaryData?.highPrice?.replace('$', '')) || undefined,
-                  low: parseFloat(data?.data?.primaryData?.lowPrice?.replace('$', '')) || undefined,
-                  volume: parseInt(data?.data?.primaryData?.volume?.replace(/,/g, '')) || undefined,
-                }
-              };
-            }
+          } catch (err) {
+            console.error(`Error fetching ${sym}`, err);
           }
-        } catch (err) {
-          console.error(`Error fetching ${sym}`, err);
+        }));
+        // Small delay between batches
+        if (i + 5 < symbols.length) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-      }));
+      }
       
       setLivePrices(prev => {
         const newPrices = { ...prev };
