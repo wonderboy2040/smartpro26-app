@@ -9,6 +9,10 @@ const PORT = 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+app.get('/api/config', (req, res) => {
+  res.json({ GEMINI_API_KEY: process.env.GEMINI_API_KEY || '' });
+});
+
 app.get('/api/portfolio', async (req, res) => {
   try {
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
