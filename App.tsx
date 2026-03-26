@@ -62,6 +62,57 @@ import {
   PolarRadiusAxis
 } from 'recharts';
 import { GoogleGenAI, ThinkingLevel, Modality, FunctionDeclaration, Type } from "@google/genai";
+
+// --- TradingView Widget Component ---
+function TradingViewWidget({ symbol, market }: { symbol: string, market: string }) {
+  const container = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!container.current) return;
+    
+    // Clear previous widget
+    container.current.innerHTML = '';
+    
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+    script.type = "text/javascript";
+    script.async = true;
+    script.onerror = () => {
+      console.error("TradingView widget failed to load.");
+      if (container.current) {
+        container.current.innerHTML = '<div class="text-slate-500 p-4">TradingView chart failed to load.</div>';
+      }
+    };
+    
+    const tvSymbol = market === 'IN' ? `NSE:${symbol.replace('.NS', '').replace('.BO', '')}` : `NASDAQ:${symbol}`;
+    
+    script.innerHTML = `
+      {
+        "autosize": true,
+        "symbol": "${tvSymbol}",
+        "interval": "D",
+        "timezone": "Etc/UTC",
+        "theme": "dark",
+        "style": "1",
+        "locale": "en",
+        "enable_publishing": false,
+        "allow_symbol_change": true,
+        "backgroundColor": "rgba(15, 23, 42, 1)",
+        "gridColor": "rgba(30, 41, 59, 1)",
+        "hide_top_toolbar": false,
+        "hide_legend": false,
+        "save_image": false,
+        "calendar": false,
+        "support_host": "https://www.tradingview.com"
+      }`;
+      
+    container.current.appendChild(script);
+  }, [symbol, market]);
+
+  return (
+    <div className="tradingview-widget-container" ref={container} style={{ height: "100%", width: "100%" }} />
+  );
+}
 import { 
   db, 
   collections,
@@ -198,43 +249,6 @@ const guessMarket = (sym: string): 'IN' | 'US' => {
   return 'US';
 };
 
-const calculateRSI = (data: {time: number, price: number}[], period: number = 14) => {
-  if (data.length < period + 1) return 50;
-  
-  let gains = 0;
-  let losses = 0;
-  
-  for (let i = 1; i <= period; i++) {
-    const change = data[i].price - data[i - 1].price;
-    if (change >= 0) {
-      gains += change;
-    } else {
-      losses -= change;
-    }
-  }
-  
-  let avgGain = gains / period;
-  let avgLoss = losses / period;
-  
-  for (let i = period + 1; i < data.length; i++) {
-    const change = data[i].price - data[i - 1].price;
-    let gain = 0;
-    let loss = 0;
-    if (change >= 0) {
-      gain = change;
-    } else {
-      loss = -change;
-    }
-    
-    avgGain = (avgGain * (period - 1) + gain) / period;
-    avgLoss = (avgLoss * (period - 1) + loss) / period;
-  }
-  
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
-};
-
 const getFinancialNews: FunctionDeclaration = {
   name: "getFinancialNews",
   description: "Fetch the latest financial news articles and headlines for a specific asset, stock, crypto, or general market trend. Use this to analyze sentiment and provide informed responses.",
@@ -271,17 +285,12 @@ export default function App() {
   const [neuralVerdict, setNeuralVerdict] = useState<{text: string, score: number} | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [chartData, setChartData] = useState<{time: number, price: number}[]>([]);
-  const [timeframe, setTimeframe] = useState('1D');
   const [threatAlert, setThreatAlert] = useState(false);
   
   const DEFAULT_USER_ID = 'default_user';
   
   // --- WebSocket Connection ---
   useEffect(() => {
-    // Clear chart data when symbol changes to prevent flickering old data
-    setChartData([]);
-    
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
     const ws = new WebSocket(wsUrl);
@@ -293,8 +302,7 @@ export default function App() {
         type: 'subscribe', 
         symbol: currentSymbol,
         market: guessMarket(currentSymbol),
-        currentPrice: currentPrice || null,
-        timeframe: timeframe
+        currentPrice: currentPrice || null
       }));
 
       // Subscribe to all portfolio and ETF symbols for real-time prices
@@ -309,8 +317,7 @@ export default function App() {
           type: 'subscribe',
           symbol: sym,
           market: guessMarket(sym),
-          currentPrice: livePrices[`${guessMarket(sym)}_${sym}`]?.price || null,
-          timeframe: '1D' // just for basic tick updates
+          currentPrice: livePrices[`${guessMarket(sym)}_${sym}`]?.price || null
         }));
       });
     };
@@ -318,21 +325,7 @@ export default function App() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'history' && data.symbol === currentSymbol) {
-          // Sort by time ascending
-          const sorted = data.data.sort((a: any, b: any) => a.time - b.time);
-          setChartData(sorted);
-        } else if (data.type === 'tick') {
-          if (data.symbol === currentSymbol) {
-            setChartData(prev => {
-              const newPoint = { time: data.time, price: data.price };
-              const newData = [...prev, newPoint];
-              // Keep last 100 points to avoid memory bloat
-              if (newData.length > 100) return newData.slice(newData.length - 100);
-              return newData;
-            });
-          }
-          
+        if (data.type === 'tick') {
           // Update livePrices for ANY symbol received
           setLivePrices(prev => ({
             ...prev,
@@ -366,7 +359,7 @@ export default function App() {
       }
       ws.close();
     };
-  }, [currentSymbol, timeframe, portfolio]);
+  }, [currentSymbol, portfolio]);
 
   // Planner State
   const [sipAmount, setSipAmount] = useState(50000);
@@ -614,7 +607,7 @@ export default function App() {
       await addChatMessage(DEFAULT_USER_ID, 'model', aiText);
     } catch (e) {
       console.error("Gemini Error:", e);
-      await addChatMessage(DEFAULT_USER_ID, 'model', "System error: Neural link unstable. Please try again.");
+      await addChatMessage(DEFAULT_USER_ID, 'model', `System error: Neural link unstable (${e instanceof Error ? e.message : String(e)}). Please try again.`);
     } finally {
       setIsThinking(false);
     }
@@ -1040,9 +1033,11 @@ export default function App() {
                           </div>
                         </div>
                         <div className="bg-slate-950/50 border border-slate-800 p-6 rounded-3xl shadow-inner">
-                          <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">RSI (14)</div>
-                          <div className={`text-xl font-black uppercase tracking-tight ${calculateRSI(chartData) > 70 ? 'text-red-400' : calculateRSI(chartData) < 30 ? 'text-emerald-400' : 'text-cyan-400'}`}>
-                            {calculateRSI(chartData).toFixed(2)}
+                          <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">VWAP</div>
+                          <div className="text-xl font-black text-cyan-400 uppercase tracking-tight">
+                            {livePrices[`${guessMarket(currentSymbol)}_${currentSymbol}`]?.fundamentals?.vwap 
+                              ? formatCurrency(livePrices[`${guessMarket(currentSymbol)}_${currentSymbol}`].fundamentals!.vwap!, guessMarket(currentSymbol), usdInr)
+                              : 'N/A'}
                           </div>
                         </div>
                       </div>
@@ -1076,57 +1071,9 @@ export default function App() {
                         <BarChart3 size={16} className="text-cyan-400" />
                         Live Price Stream
                       </h3>
-                      <div className="flex gap-2">
-                        {['1M', '5M', '1H'].map(t => (
-                          <button 
-                            key={t} 
-                            onClick={() => setTimeframe(t)}
-                            className={`px-3 py-1 rounded-lg text-[10px] font-black border border-slate-800 ${timeframe === t ? 'bg-cyan-600 text-white' : 'text-slate-500'}`}
-                          >
-                            {t}
-                          </button>
-                        ))}
-                      </div>
                     </div>
-                    <div className="h-[320px] w-full">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={chartData}>
-                          <defs>
-                            <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3}/>
-                              <stop offset="95%" stopColor="#06b6d4" stopOpacity={0}/>
-                            </linearGradient>
-                          </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                          <XAxis 
-                            dataKey="time" 
-                            stroke="#475569" 
-                            fontSize={10} 
-                            tickFormatter={(v) => {
-                              const d = new Date(v);
-                              if (timeframe === '1H') {
-                                return `${d.getDate()}/${d.getMonth()+1} ${d.getHours()}:00`;
-                              }
-                              return `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}`;
-                            }} 
-                            minTickGap={30}
-                          />
-                          <YAxis 
-                            domain={['auto', 'auto']}
-                            stroke="#475569" 
-                            fontSize={10} 
-                            tickFormatter={(v) => formatCurrency(v, guessMarket(currentSymbol), usdInr)} 
-                            width={80}
-                          />
-                          <Tooltip 
-                            contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px' }}
-                            itemStyle={{ color: '#06b6d4', fontWeight: 'bold' }}
-                            labelFormatter={(v) => new Date(v).toLocaleTimeString()}
-                            formatter={(v: number) => [formatCurrency(v, guessMarket(currentSymbol), usdInr), 'Price']}
-                          />
-                          <Area type="monotone" dataKey="price" stroke="#06b6d4" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={3} isAnimationActive={false} />
-                        </AreaChart>
-                      </ResponsiveContainer>
+                    <div className="h-[400px] w-full mt-6 rounded-xl overflow-hidden border border-slate-800">
+                      <TradingViewWidget symbol={currentSymbol} market={guessMarket(currentSymbol)} />
                     </div>
                   </div>
                 </div>
