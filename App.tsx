@@ -424,6 +424,9 @@ export default function App() {
     addLog(`Initializing Neural Deep Scan for ${targetSymbol}...`, 'info');
     
     try {
+      if (!process.env.GEMINI_API_KEY) {
+        throw new Error("GEMINI_API_KEY is not set. Please add it to your Render environment variables and rebuild the app.");
+      }
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
@@ -454,6 +457,10 @@ export default function App() {
     if (!text) return;
     setIsSpeaking(true);
     try {
+      if (!process.env.GEMINI_API_KEY) {
+        console.warn("GEMINI_API_KEY is not set. Text-to-speech will not work.");
+        return;
+      }
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
@@ -512,6 +519,9 @@ export default function App() {
     setIsThinking(true);
 
     try {
+      if (!process.env.GEMINI_API_KEY) {
+        throw new Error("GEMINI_API_KEY is not set. Please add it to your Render environment variables and rebuild the app.");
+      }
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
       // Determine complexity for model selection
