@@ -291,6 +291,21 @@ export default function App() {
   
   const DEFAULT_USER_ID = 'default_user';
   
+  // --- Fetch Config ---
+  useEffect(() => {
+    fetch('/api/config')
+      .then(res => res.json())
+      .then(data => {
+        if (data.GEMINI_API_KEY) {
+          const w = window as any;
+          if (!w.process) w.process = { env: {} };
+          if (!w.process.env) w.process.env = {};
+          w.process.env.GEMINI_API_KEY = data.GEMINI_API_KEY;
+        }
+      })
+      .catch(err => console.error("Failed to fetch config:", err));
+  }, []);
+
   // --- WebSocket Connection ---
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
