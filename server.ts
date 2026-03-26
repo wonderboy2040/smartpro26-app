@@ -32,28 +32,6 @@ app.get('/api/portfolio', async (req, res) => {
   }
 });
 
-// --- NSE API Helper ---
-let nseCookies = '';
-const nseHeaders = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Referer': 'https://www.nseindia.com/get-quotes/equity?symbol=NIFTY',
-  'Origin': 'https://www.nseindia.com'
-};
-
-async function getNseCookies() {
-  try {
-    const response = await fetch('https://www.nseindia.com', { headers: nseHeaders });
-    const cookies = response.headers.getSetCookie();
-    if (cookies && cookies.length > 0) {
-      nseCookies = cookies.map(c => c.split(';')[0]).join('; ');
-    }
-  } catch (e) {
-    console.error('Failed to get NSE cookies', e);
-  }
-}
-
 app.get('/api/news/:query', async (req, res) => {
   try {
     const query = encodeURIComponent(req.params.query);
@@ -78,102 +56,85 @@ app.get('/api/nse/quote/:symbol', async (req, res) => {
   let symbol = req.params.symbol.replace('.NS', '').toUpperCase();
   
   try {
-    if (!nseCookies) await getNseCookies();
-    
-    let response = await fetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`, {
-      headers: { ...nseHeaders, 'Cookie': nseCookies }
+    const response = await fetch('https://scanner.tradingview.com/india/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbols: { tickers: [`NSE:${symbol}`, `BSE:${symbol}`] },
+        columns: ["close", "change", "change_abs", "high", "low", "open", "volume", "VWAP"]
+      })
     });
     
-    if (response.status === 401 || response.status === 403) {
-      console.log('NSE API returned', response.status, 'refreshing cookies');
-      await getNseCookies();
-      response = await fetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`, {
-        headers: { ...nseHeaders, 'Cookie': nseCookies }
-      });
+    if (!response.ok) throw new Error(`TradingView API returned ${response.status}`);
+    const data = await response.json();
+    
+    if (!data.data || data.data.length === 0) {
+      return res.status(404).json({ error: 'Symbol not found' });
     }
     
-    if (!response.ok) {
-      const text = await response.text();
-      console.error(`NSE API returned ${response.status}: ${text}`);
-      throw new Error(`NSE API returned ${response.status}`);
-    }
-    const data = await response.json();
-    res.json(data);
+    const d = data.data[0].d;
+    
+    const mappedData = {
+      priceInfo: {
+        lastPrice: d[0] || 0,
+        pChange: d[1] || 0,
+        change: d[2] || 0,
+        open: d[5] || 0,
+        intraDayHighLow: {
+          max: d[3] || 0,
+          min: d[4] || 0
+        },
+        vwap: d[7] || 0
+      },
+      preOpenMarket: {
+        preopen: [{ price: d[5] || 0 }],
+        totalTradedVolume: d[6] || 0
+      }
+    };
+    
+    res.json(mappedData);
   } catch (error) {
-    console.error('NSE Fetch Error:', error);
-    res.status(500).json({ error: 'Failed to fetch from NSE' });
+    console.error('TradingView NSE Fetch Error:', error);
+    res.status(500).json({ error: 'Failed to fetch from TradingView' });
   }
 });
 
-app.get('/api/nse/chart/:symbol', async (req, res) => {
-  let symbol = req.params.symbol.replace('.NS', '').toUpperCase();
-  
-  try {
-    if (!nseCookies) await getNseCookies();
-    
-    // First get the quote to get the exact identifier
-    let quoteRes = await fetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`, {
-      headers: { ...nseHeaders, 'Cookie': nseCookies }
-    });
-    
-    if (quoteRes.status === 401 || quoteRes.status === 403) {
-      await getNseCookies();
-      quoteRes = await fetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`, {
-        headers: { ...nseHeaders, 'Cookie': nseCookies }
-      });
-    }
-    
-    if (!quoteRes.ok) throw new Error(`NSE Quote API returned ${quoteRes.status}`);
-    const quoteData = await quoteRes.json();
-    const identifier = quoteData?.info?.identifier || (symbol + 'EQN');
-    
-    let response = await fetch(`https://www.nseindia.com/api/chart-databyindex?index=${encodeURIComponent(identifier)}`, {
-      headers: { ...nseHeaders, 'Cookie': nseCookies }
-    });
-    
-    if (!response.ok) throw new Error(`NSE Chart API returned ${response.status}`);
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    console.error('NSE Chart Fetch Error:', error);
-    res.status(500).json({ error: 'Failed to fetch chart from NSE' });
-  }
-});
-
-// --- US API Helper (Nasdaq) ---
+// --- US API Helper (TradingView) ---
 app.get('/api/us/quote/:symbol', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   try {
-    const fetchWithRetry = async (assetClass: string) => {
-      const response = await fetch(`https://api.nasdaq.com/api/quote/${symbol}/info?assetclass=${assetClass}`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json, text/plain, */*',
-          'Origin': 'https://www.nasdaq.com',
-          'Referer': 'https://www.nasdaq.com/'
-        }
-      });
-      if (!response.ok) throw new Error(`Nasdaq API returned ${response.status}`);
-      
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error('Response is not JSON');
-      }
-      
-      return await response.json();
-    };
-
-    try {
-      const data = await fetchWithRetry('etf');
-      res.json(data);
-    } catch (e) {
-      // Fallback to stock
-      const data = await fetchWithRetry('stocks');
-      res.json(data);
+    const response = await fetch('https://scanner.tradingview.com/america/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbols: { tickers: [`NASDAQ:${symbol}`, `NYSE:${symbol}`, `AMEX:${symbol}`] },
+        columns: ["close", "change", "change_abs", "high", "low", "open", "volume", "VWAP"]
+      })
+    });
+    
+    if (!response.ok) throw new Error(`TradingView API returned ${response.status}`);
+    const data = await response.json();
+    
+    if (!data.data || data.data.length === 0) {
+      return res.status(404).json({ error: 'Symbol not found' });
     }
+    
+    const d = data.data[0].d;
+    
+    const mappedData = {
+      data: {
+        primaryData: {
+          lastSalePrice: `$${d[0]}`,
+          percentageChange: `${d[1]}%`,
+          netChange: `${d[2]}`,
+          volume: `${d[6]}`
+        }
+      }
+    };
+    res.json(mappedData);
   } catch (error) {
-    console.error('US Fetch Error:', error);
-    res.status(500).json({ error: 'Failed to fetch from US Market' });
+    console.error('TradingView US Fetch Error:', error);
+    res.status(500).json({ error: 'Failed to fetch from TradingView' });
   }
 });
 
@@ -245,102 +206,154 @@ function generateHistoricalData(symbol: string, market: string, startPrice?: num
   return data.reverse(); // Reverse so it goes from oldest to newest
 }
 
+// Helper to check if market is open
+function isMarketOpen(market: 'IN' | 'US') {
+  const now = new Date();
+  const day = now.getUTCDay();
+  if (day === 0 || day === 6) return false; // Weekend
+  
+  const utcHours = now.getUTCHours();
+  const utcMinutes = now.getUTCMinutes();
+  const currentTime = utcHours * 60 + utcMinutes;
+
+  if (market === 'IN') {
+    // 09:15 to 15:30 IST -> 03:45 to 10:00 UTC
+    // 03:45 UTC = 225 minutes
+    // 10:00 UTC = 600 minutes
+    return currentTime >= 225 && currentTime <= 600;
+  } else {
+    // 09:30 to 16:00 ET -> 14:30 to 21:00 UTC
+    // 14:30 UTC = 870 minutes
+    // 21:00 UTC = 1260 minutes
+    return currentTime >= 870 && currentTime <= 1260;
+  }
+}
+
 // Polling loop for real-time updates
 setInterval(async () => {
   if (activeSymbols.size === 0) return;
   
+  const inSymbols: string[] = [];
+  const usSymbols: string[] = [];
+  
   for (const symbol of activeSymbols) {
-    try {
-      const s = symbol.toUpperCase();
-      const isIN = s.endsWith('.NS') || 
-                   s.endsWith('.BO') || 
-                   s.includes('BEES') || 
-                   s.includes('MOMOMENTUM') || 
-                   s.includes('NIFTY') || 
-                   s.includes('SENSEX') ||
-                   s.includes('SMALLCAP') ||
-                   s.includes('MIDCAP');
-      const cleanSym = symbol.replace('.NS', '').replace('.BO', '');
-      
-      let price = 0;
-      let change = 0;
-      let volume = 0;
-      
-      if (isIN) {
-        if (!nseCookies) await getNseCookies();
-        let res = await fetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(cleanSym)}`, {
-          headers: { ...nseHeaders, 'Cookie': nseCookies }
-        });
-        if (res.status === 401 || res.status === 403) {
-          await getNseCookies();
-          res = await fetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(cleanSym)}`, {
-            headers: { ...nseHeaders, 'Cookie': nseCookies }
-          });
-        }
-        if (res.ok) {
-          const data = await res.json();
-          price = data.priceInfo?.lastPrice || 0;
-          change = data.priceInfo?.pChange || 0;
-          volume = data.preOpenMarket?.totalTradedVolume || 0;
-        }
-      } else {
-        const res = await fetch(`https://api.nasdaq.com/api/quote/${cleanSym}/info?assetclass=etf`, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Origin': 'https://www.nasdaq.com',
-            'Referer': 'https://www.nasdaq.com/'
-          }
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const primaryData = data?.data?.primaryData || {};
-          price = parseFloat(primaryData.lastSalePrice?.replace('$', '')) || 0;
-          change = parseFloat(primaryData.percentageChange?.replace('%', '')) || 0;
-          volume = parseInt(primaryData.volume?.replace(/,/g, '')) || 0;
-        } else {
-          // Fallback to stock
-          const stockRes = await fetch(`https://api.nasdaq.com/api/quote/${cleanSym}/info?assetclass=stocks`, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': 'application/json, text/plain, */*',
-              'Origin': 'https://www.nasdaq.com',
-              'Referer': 'https://www.nasdaq.com/'
-            }
-          });
-          if (stockRes.ok) {
-            const data = await stockRes.json();
-            const primaryData = data?.data?.primaryData || {};
-            price = parseFloat(primaryData.lastSalePrice?.replace('$', '')) || 0;
-            change = parseFloat(primaryData.percentageChange?.replace('%', '')) || 0;
-            volume = parseInt(primaryData.volume?.replace(/,/g, '')) || 0;
-          }
-        }
-      }
-      
-      if (price > 0) {
-        const update = {
-          type: 'tick',
-          symbol,
-          price,
-          change,
-          volume,
-          time: Date.now()
-        };
-        
-        // Broadcast to subscribers
-        const msg = JSON.stringify(update);
-        for (const [ws, subs] of subscriptions.entries()) {
-          if (subs.has(symbol) && ws.readyState === WebSocket.OPEN) {
-            ws.send(msg);
-          }
-        }
-      }
-    } catch (e) {
-      console.error(`WS Polling Error for ${symbol}:`, e);
-    }
+    const s = symbol.toUpperCase();
+    const isIN = s.endsWith('.NS') || 
+                 s.endsWith('.BO') || 
+                 s.includes('BEES') || 
+                 s.includes('MOMOMENTUM') || 
+                 s.includes('NIFTY') || 
+                 s.includes('SENSEX') ||
+                 s.includes('SMALLCAP') ||
+                 s.includes('MIDCAP') ||
+                 s.includes('BANKNIFTY') ||
+                 s.includes('FINNIFTY');
+    if (isIN) inSymbols.push(symbol);
+    else usSymbols.push(symbol);
   }
-}, 1000); // Poll every 1 second for ultra-fast updates
+  
+  console.log('Processing Symbols:', { inSymbols, usSymbols });
+  
+  try {
+    // Fetch IN symbols
+    if (inSymbols.length > 0 && isMarketOpen('IN')) {
+      const tickers = inSymbols.flatMap(s => {
+        const cleanSym = s.replace('.NS', '').replace('.BO', '');
+        return [`NSE:${cleanSym}`, `BSE:${cleanSym}`];
+      });
+      
+      const res = await fetch('https://scanner.tradingview.com/india/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbols: { tickers },
+          columns: ["name", "close", "change", "volume"]
+        })
+      });
+      
+      if (res.status === 429) {
+        console.warn('TradingView India Scan: Rate limited (429). Backing off for 60s.');
+        await new Promise(resolve => setTimeout(resolve, 60000));
+      } else if (res.ok) {
+        const data = await res.json();
+        if (data.data) {
+          for (const item of data.data) {
+            const name = item.d[0]; // name is the first column
+            const price = item.d[1];
+            const change = item.d[2];
+            const volume = item.d[3];
+            
+            // Find the original symbol
+            const originalSym = inSymbols.find(s => s.replace('.NS', '').replace('.BO', '') === name);
+            if (originalSym && price > 0) {
+              const msg = JSON.stringify({
+                type: 'tick',
+                symbol: originalSym,
+                price,
+                change,
+                volume,
+                time: Date.now()
+              });
+              for (const [ws, subs] of subscriptions.entries()) {
+                if (subs.has(originalSym) && ws.readyState === WebSocket.OPEN) {
+                  ws.send(msg);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    // Fetch US symbols
+    if (usSymbols.length > 0 && isMarketOpen('US')) {
+      const tickers = usSymbols.flatMap(s => [`NASDAQ:${s}`, `NYSE:${s}`, `AMEX:${s}`]);
+      
+      const res = await fetch('https://scanner.tradingview.com/america/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbols: { tickers },
+          columns: ["name", "close", "change", "volume"]
+        })
+      });
+      
+      if (res.status === 429) {
+        console.warn('TradingView US Scan: Rate limited (429). Backing off for 60s.');
+        await new Promise(resolve => setTimeout(resolve, 60000));
+      } else if (res.ok) {
+        const data = await res.json();
+        if (data.data) {
+          for (const item of data.data) {
+            const name = item.d[0];
+            const price = item.d[1];
+            const change = item.d[2];
+            const volume = item.d[3];
+            
+            const originalSym = usSymbols.find(s => s === name);
+            if (originalSym && price > 0) {
+              const msg = JSON.stringify({
+                type: 'tick',
+                symbol: originalSym,
+                price,
+                change,
+                volume,
+                time: Date.now()
+              });
+              for (const [ws, subs] of subscriptions.entries()) {
+                if (subs.has(originalSym) && ws.readyState === WebSocket.OPEN) {
+                  ws.send(msg);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('TradingView WS Polling Error:', e);
+  }
+}, 60000); // Poll every 60 seconds to be much safer
 
 // Vite middleware
 async function startServer() {
